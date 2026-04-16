@@ -386,11 +386,11 @@ func NewAWSSession() *aws.Config {
 	return &cfg
 }
 
-func NewAWSSessionRepoWithKey(accessKey *iamtypes.AccessKey) *aws.Config {
+func NewAWSSessionRepoWithKey(creds aws.Credentials) *aws.Config {
 	By("Getting an AWS IAM session - from access key")
 	region, err := credentials.ResolveRegion("us-east-1")
 	Expect(err).NotTo(HaveOccurred())
-	staticCredProvider := awscredsv2.NewStaticCredentialsProvider(aws.ToString(accessKey.AccessKeyId), aws.ToString(accessKey.SecretAccessKey), "")
+	staticCredProvider := awscredsv2.NewStaticCredentialsProvider(creds.AccessKeyID, creds.SecretAccessKey, creds.SessionToken)
 	optFns := []func(*config.LoadOptions) error{
 		config.WithRegion(region),
 		config.WithCredentialsProvider(staticCredProvider),
@@ -734,7 +734,9 @@ func deleteCloudFormationStack(cfg *aws.Config, t *cfn_bootstrap.Template) {
 }
 
 func ensureTestImageUploaded(ctx context.Context, e2eCtx *E2EContext) error {
-	sessionForRepo := NewAWSSessionRepoWithKey(e2eCtx.Environment.BootstrapAccessKey)
+	creds, err := e2eCtx.BootstrapUserAWSSession.Credentials.Retrieve(ctx)
+	Expect(err).NotTo(HaveOccurred())
+	sessionForRepo := NewAWSSessionRepoWithKey(creds)
 
 	ecrSvc := ecrpublic.NewFromConfig(*sessionForRepo)
 	repoName := ""
@@ -767,7 +769,7 @@ func ensureTestImageUploaded(ctx context.Context, e2eCtx *E2EContext) error {
 	cmd := exec.CommandContext(ctx, "docker", "inspect", "--format='{{index .Id}}'", "gcr.io/k8s-staging-cluster-api/capa-manager:e2e")
 	var stdOut bytes.Buffer
 	cmd.Stdout = &stdOut
-	err := cmd.Run()
+	err = cmd.Run()
 	if err != nil {
 		return err
 	}
@@ -872,14 +874,46 @@ func encodeCredentials(accessKey *iamtypes.AccessKey, region string) string {
 	return encCreds
 }
 
+// encodeCredentialsFromConfig encodes AWS credentials retrieved from an existing
+// session, preserving any session token present for non-IAM-user principals
+// (assumed roles, SSO, instance profiles, etc.).
+func encodeCredentialsFromConfig(cfg *aws.Config, region string) string {
+	retrieved, err := cfg.Credentials.Retrieve(context.TODO())
+	Expect(err).NotTo(HaveOccurred())
+	creds := credentials.AWSCredentials{
+		Region:          region,
+		AccessKeyID:     retrieved.AccessKeyID,
+		SecretAccessKey: retrieved.SecretAccessKey,
+		SessionToken:    retrieved.SessionToken,
+	}
+	encCreds, err := creds.RenderBase64EncodedAWSDefaultProfile()
+	Expect(err).NotTo(HaveOccurred())
+	return encCreds
+}
+
+// iamUserExists returns true if the named IAM user exists.
+func iamUserExists(ctx context.Context, cfg *aws.Config, userName string) bool {
+	iamSvc := iam.NewFromConfig(*cfg)
+	_, err := iamSvc.GetUser(ctx, &iam.GetUserInput{UserName: aws.String(userName)})
+	if err != nil {
+		var nse *iamtypes.NoSuchEntityException
+		if errors.As(err, &nse) {
+			return false
+		}
+		Expect(err).NotTo(HaveOccurred())
+	}
+	return true
+}
+
 // newUserAccessKey generates a new AWS Access Key pair based off of the
 // bootstrap user. This tests that the CloudFormation policy is correct.
 func newUserAccessKey(ctx context.Context, cfg *aws.Config, userName string) *iamtypes.AccessKey {
 	iamSvc := iam.NewFromConfig(*cfg)
 
-	keyOuts, _ := iamSvc.ListAccessKeys(ctx, &iam.ListAccessKeysInput{
+	keyOuts, err := iamSvc.ListAccessKeys(ctx, &iam.ListAccessKeysInput{
 		UserName: aws.String(userName),
 	})
+	Expect(err).NotTo(HaveOccurred())
 	for i := range keyOuts.AccessKeyMetadata {
 		By(fmt.Sprintf("Deleting an existing access key: user-name=%s", userName))
 		_, err := iamSvc.DeleteAccessKey(ctx, &iam.DeleteAccessKeyInput{
