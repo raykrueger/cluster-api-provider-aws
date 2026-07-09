@@ -16,6 +16,7 @@ The AWS provider supports creating EKS based cluster. Currently the following fe
 - Managing "EKS Addons". See [addons for further details](./addons.md)
 - Creating an EKS fargate profile
 - Managing aws-iam-authenticator configuration
+- Enabling EKS Auto Mode. See [Auto Mode for further details](./automode.md)
 
 Note: machine pools and fargate profiles are still classed as experimental.
 
@@ -38,3 +39,4 @@ And a number of new templates are available in the templates folder for creating
 - [Enabling Encryption](encryption.md)
 - [Cluster Upgrades](cluster-upgrades.md)
 - [Using EKS Pod Identity for controller credentials](eks-pod-identity.md)
+- [EKS Auto Mode](automode.md)
