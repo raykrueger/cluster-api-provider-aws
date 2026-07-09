@@ -226,6 +226,10 @@ type AWSManagedControlPlaneSpec struct { //nolint: maligned
 	// +kubebuilder:validation:Enum=extended;standard
 	// +optional
 	UpgradePolicy UpgradePolicy `json:"upgradePolicy,omitempty"`
+
+	// AutoMode configures EKS Auto Mode for this cluster.
+	// +optional
+	AutoMode *AutoMode `json:"autoMode,omitempty"`
 }
 
 // KubeProxy specifies how the kube-proxy daemonset is managed.
@@ -237,6 +241,42 @@ type KubeProxy struct {
 	// set this to true if you are using the Amazon kube-proxy addon.
 	// +kubebuilder:default=false
 	Disable bool `json:"disable,omitempty"`
+}
+
+// AutoModeState indicates whether EKS Auto Mode is enabled on the cluster.
+// +kubebuilder:validation:Enum=Enabled;Disabled
+type AutoModeState string
+
+const (
+	// AutoModeStateEnabled indicates that EKS Auto Mode is enabled.
+	AutoModeStateEnabled AutoModeState = "Enabled"
+	// AutoModeStateDisabled indicates that EKS Auto Mode is disabled.
+	AutoModeStateDisabled AutoModeState = "Disabled"
+)
+
+// AutoMode is the EKS Auto Mode configuration block.
+// Enabling Auto Mode delegates compute, block storage, and load balancing to EKS.
+type AutoMode struct {
+	// Mode toggles EKS Auto Mode on the cluster.
+	// +kubebuilder:default=Disabled
+	Mode AutoModeState `json:"mode"`
+
+	// Compute configures the compute capability of EKS Auto Mode.
+	// +optional
+	Compute *AutoModeCompute `json:"compute,omitempty"`
+}
+
+// AutoModeCompute configures compute capability for EKS Auto Mode.
+type AutoModeCompute struct {
+	// NodePools defines the compute resources for the Auto Mode cluster.
+	// +kubebuilder:validation:items:Enum=system;general-purpose
+	// +optional
+	NodePools []string `json:"nodePools,omitempty"`
+
+	// NodeRoleArn is the ARN of the IAM role EKS will assign to nodes provisioned by Auto Mode.
+	// Immutable once set.
+	// +optional
+	NodeRoleArn *string `json:"nodeRoleArn,omitempty"`
 }
 
 // VpcCni specifies configuration related to the VPC CNI.
