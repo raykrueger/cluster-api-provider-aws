@@ -1,0 +1,28 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CAPA EKS Auto Mode development IAM node role.
+  This is a dev artifact intended to be folded into clusterawsadm bootstrap CloudFormation in a follow-up.
+
+Resources:
+  EKSAutoModeNodeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: capa-eks-automode-node-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEKSWorkerNodeMinimalPolicy
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPullOnly
+        - arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy
+
+Outputs:
+  NodeRoleArn:
+    Description: ARN of the EKS Auto Mode node IAM role
+    Value: !GetAtt EKSAutoModeNodeRole.Arn
+    Export:
+      Name: capa-eks-automode-node-role-arn
