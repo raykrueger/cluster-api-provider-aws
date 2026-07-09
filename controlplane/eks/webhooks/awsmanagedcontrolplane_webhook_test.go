@@ -194,6 +194,7 @@ func TestWebhookCreate(t *testing.T) {
 		secondaryCidrBlocks  []infrav1.VpcCidrBlock
 		kubeProxy            ekscontrolplanev1.KubeProxy
 		accessConfig         *ekscontrolplanev1.AccessConfig
+		autoMode             *ekscontrolplanev1.AutoMode
 	}{
 		{
 			name:           "ekscluster specified",
@@ -378,6 +379,82 @@ func TestWebhookCreate(t *testing.T) {
 				BootstrapClusterCreatorAdminPermissions: ptr.To(false),
 			},
 		},
+		{
+			name:           "autoMode enabled without accessConfig",
+			eksClusterName: "default_cluster1",
+			eksVersion:     "v1.19",
+			expectError:    true,
+			expectErrorToContain: "autoMode requires accessConfig.authenticationMode to be set to api or api_and_config_map",
+			autoMode: &ekscontrolplanev1.AutoMode{
+				Mode: ekscontrolplanev1.AutoModeStateEnabled,
+			},
+		},
+		{
+			name:           "autoMode enabled with config_map authentication",
+			eksClusterName: "default_cluster1",
+			eksVersion:     "v1.19",
+			expectError:    true,
+			expectErrorToContain: "autoMode requires accessConfig.authenticationMode to be set to api or api_and_config_map",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeConfigMap,
+			},
+			autoMode: &ekscontrolplanev1.AutoMode{
+				Mode: ekscontrolplanev1.AutoModeStateEnabled,
+			},
+		},
+		{
+			name:           "autoMode enabled with api authentication",
+			eksClusterName: "default_cluster1",
+			eksVersion:     "v1.19",
+			expectError:    false,
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			autoMode: &ekscontrolplanev1.AutoMode{
+				Mode: ekscontrolplanev1.AutoModeStateEnabled,
+			},
+		},
+		{
+			name:           "autoMode enabled with nodePools but no nodeRoleArn",
+			eksClusterName: "default_cluster1",
+			eksVersion:     "v1.19",
+			expectError:    true,
+			expectErrorToContain: "nodeRoleArn is required when nodePools is specified",
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			autoMode: &ekscontrolplanev1.AutoMode{
+				Mode: ekscontrolplanev1.AutoModeStateEnabled,
+				Compute: &ekscontrolplanev1.AutoModeCompute{
+					NodePools: []string{"general-purpose"},
+				},
+			},
+		},
+		{
+			name:           "autoMode enabled with nodePools and nodeRoleArn",
+			eksClusterName: "default_cluster1",
+			eksVersion:     "v1.19",
+			expectError:    false,
+			accessConfig: &ekscontrolplanev1.AccessConfig{
+				AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+			},
+			autoMode: &ekscontrolplanev1.AutoMode{
+				Mode: ekscontrolplanev1.AutoModeStateEnabled,
+				Compute: &ekscontrolplanev1.AutoModeCompute{
+					NodePools:   []string{"general-purpose"},
+					NodeRoleArn: aws.String("arn:aws:iam::123456789012:role/test-node-role"),
+				},
+			},
+		},
+		{
+			name:           "autoMode disabled is valid without accessConfig",
+			eksClusterName: "default_cluster1",
+			eksVersion:     "v1.19",
+			expectError:    false,
+			autoMode: &ekscontrolplanev1.AutoMode{
+				Mode: ekscontrolplanev1.AutoModeStateDisabled,
+			},
+		},
 	}
 
 	for _, tc := range tests {
@@ -421,9 +498,12 @@ func TestWebhookCreate(t *testing.T) {
 			if tc.secondaryCidr != nil {
 				mcp.Spec.SecondaryCidrBlock = tc.secondaryCidr
 			}
-			if tc.accessConfig != nil {
-				mcp.Spec.AccessConfig = tc.accessConfig
-			}
+		if tc.accessConfig != nil {
+			mcp.Spec.AccessConfig = tc.accessConfig
+		}
+		if tc.autoMode != nil {
+			mcp.Spec.AutoMode = tc.autoMode
+		}
 
 			err := testEnv.Create(ctx, mcp)
 
@@ -890,6 +970,85 @@ func TestWebhookUpdate(t *testing.T) {
 				Version: ptr.To[string]("v1.22.0"),
 			},
 			expectError: true,
+		},
+		{
+			name: "autoMode nodeRoleArn unchanged",
+			oldClusterSpec: ekscontrolplanev1.AWSManagedControlPlaneSpec{
+				EKSClusterName: "default_cluster1",
+				AccessConfig: &ekscontrolplanev1.AccessConfig{
+					AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+				},
+				AutoMode: &ekscontrolplanev1.AutoMode{
+					Mode: ekscontrolplanev1.AutoModeStateEnabled,
+					Compute: &ekscontrolplanev1.AutoModeCompute{
+						NodeRoleArn: aws.String("arn:aws:iam::123456789012:role/test-node-role"),
+					},
+				},
+			},
+			newClusterSpec: ekscontrolplanev1.AWSManagedControlPlaneSpec{
+				EKSClusterName: "default_cluster1",
+				AccessConfig: &ekscontrolplanev1.AccessConfig{
+					AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+				},
+				AutoMode: &ekscontrolplanev1.AutoMode{
+					Mode: ekscontrolplanev1.AutoModeStateEnabled,
+					Compute: &ekscontrolplanev1.AutoModeCompute{
+						NodeRoleArn: aws.String("arn:aws:iam::123456789012:role/test-node-role"),
+						NodePools:   []string{"general-purpose"},
+					},
+				},
+			},
+			expectError: false,
+		},
+		{
+			name: "autoMode nodeRoleArn changed",
+			oldClusterSpec: ekscontrolplanev1.AWSManagedControlPlaneSpec{
+				EKSClusterName: "default_cluster1",
+				AccessConfig: &ekscontrolplanev1.AccessConfig{
+					AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+				},
+				AutoMode: &ekscontrolplanev1.AutoMode{
+					Mode: ekscontrolplanev1.AutoModeStateEnabled,
+					Compute: &ekscontrolplanev1.AutoModeCompute{
+						NodeRoleArn: aws.String("arn:aws:iam::123456789012:role/test-node-role"),
+					},
+				},
+			},
+			newClusterSpec: ekscontrolplanev1.AWSManagedControlPlaneSpec{
+				EKSClusterName: "default_cluster1",
+				AccessConfig: &ekscontrolplanev1.AccessConfig{
+					AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+				},
+				AutoMode: &ekscontrolplanev1.AutoMode{
+					Mode: ekscontrolplanev1.AutoModeStateEnabled,
+					Compute: &ekscontrolplanev1.AutoModeCompute{
+						NodeRoleArn: aws.String("arn:aws:iam::123456789012:role/different-node-role"),
+					},
+				},
+			},
+			expectError: true,
+		},
+		{
+			name: "autoMode enable to disable",
+			oldClusterSpec: ekscontrolplanev1.AWSManagedControlPlaneSpec{
+				EKSClusterName: "default_cluster1",
+				AccessConfig: &ekscontrolplanev1.AccessConfig{
+					AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+				},
+				AutoMode: &ekscontrolplanev1.AutoMode{
+					Mode: ekscontrolplanev1.AutoModeStateEnabled,
+				},
+			},
+			newClusterSpec: ekscontrolplanev1.AWSManagedControlPlaneSpec{
+				EKSClusterName: "default_cluster1",
+				AccessConfig: &ekscontrolplanev1.AccessConfig{
+					AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+				},
+				AutoMode: &ekscontrolplanev1.AutoMode{
+					Mode: ekscontrolplanev1.AutoModeStateDisabled,
+				},
+			},
+			expectError: false,
 		},
 	}
 
