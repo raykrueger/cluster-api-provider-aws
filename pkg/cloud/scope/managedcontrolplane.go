@@ -444,6 +444,17 @@ func (s *ManagedControlPlaneScope) BootstrapSelfManagedAddons() *bool {
 	return &s.ControlPlane.Spec.BootstrapSelfManagedAddons
 }
 
+// IsAutoModeEnabled reports whether EKS Auto Mode should be enabled for this cluster.
+func (s *ManagedControlPlaneScope) IsAutoModeEnabled() bool {
+	return s.ControlPlane.Spec.AutoMode != nil &&
+		s.ControlPlane.Spec.AutoMode.Mode == ekscontrolplanev1.AutoModeStateEnabled
+}
+
+// AutoMode returns the Auto Mode configuration for this cluster.
+func (s *ManagedControlPlaneScope) AutoMode() *ekscontrolplanev1.AutoMode {
+	return s.ControlPlane.Spec.AutoMode
+}
+
 // VpcCni returns a list of environment variables to apply to the `aws-node` DaemonSet.
 func (s *ManagedControlPlaneScope) VpcCni() ekscontrolplanev1.VpcCni {
 	return s.ControlPlane.Spec.VpcCni
