@@ -110,6 +110,7 @@ func (w *AWSManagedControlPlane) ValidateCreate(_ context.Context, obj runtime.O
 	allErrs = append(allErrs, w.validatePrivateDNSHostnameTypeOnLaunch(r)...)
 	allErrs = append(allErrs, w.validateAccessConfigCreate(r)...)
 	allErrs = append(allErrs, w.validateAccessEntries(r)...)
+	allErrs = append(allErrs, w.validateAutoMode(r)...)
 
 	if len(allErrs) == 0 {
 		return nil, nil
@@ -153,6 +154,8 @@ func (w *AWSManagedControlPlane) ValidateUpdate(ctx context.Context, oldObj, new
 	allErrs = append(allErrs, r.Spec.AdditionalTags.Validate()...)
 	allErrs = append(allErrs, w.validatePrivateDNSHostnameTypeOnLaunch(r)...)
 	allErrs = append(allErrs, w.validateAccessEntries(r)...)
+	allErrs = append(allErrs, w.validateAutoMode(r)...)
+	allErrs = append(allErrs, w.validateAutoModeUpdate(r, oldAWSManagedControlplane)...)
 
 	if r.Spec.Region != oldAWSManagedControlplane.Spec.Region {
 		allErrs = append(allErrs,
@@ -643,6 +646,60 @@ func validateNetwork(resourceName string, networkSpec infrav1.NetworkSpec, secon
 				ipv6Path.Child("ipamPool"), networkSpec.VPC.IPv6.IPAMPool,
 				"ipamPool must have either id or name",
 			))
+		}
+	}
+
+	return allErrs
+}
+
+func (w *AWSManagedControlPlane) validateAutoMode(r *ekscontrolplanev1.AWSManagedControlPlane) field.ErrorList {
+	var allErrs field.ErrorList
+
+	if r.Spec.AutoMode == nil {
+		return allErrs
+	}
+
+	autoModePath := field.NewPath("spec", "autoMode")
+
+	// Auto Mode requires authentication mode to be api or api_and_config_map
+	if r.Spec.AutoMode.Mode == ekscontrolplanev1.AutoModeStateEnabled {
+		if r.Spec.AccessConfig == nil ||
+			(r.Spec.AccessConfig.AuthenticationMode != ekscontrolplanev1.EKSAuthenticationModeAPI &&
+				r.Spec.AccessConfig.AuthenticationMode != ekscontrolplanev1.EKSAuthenticationModeAPIAndConfigMap) {
+			allErrs = append(allErrs, field.Invalid(
+				autoModePath.Child("mode"),
+				r.Spec.AutoMode.Mode,
+				"autoMode requires accessConfig.authenticationMode to be set to api or api_and_config_map",
+			))
+		}
+	}
+
+	// nodeRoleArn is required when nodePools is specified
+	if r.Spec.AutoMode.Compute != nil && len(r.Spec.AutoMode.Compute.NodePools) > 0 && r.Spec.AutoMode.Compute.NodeRoleArn == nil {
+		allErrs = append(allErrs, field.Required(
+			autoModePath.Child("compute", "nodeRoleArn"),
+			"nodeRoleArn is required when nodePools is specified",
+		))
+	}
+
+	return allErrs
+}
+
+func (w *AWSManagedControlPlane) validateAutoModeUpdate(r *ekscontrolplanev1.AWSManagedControlPlane, old *ekscontrolplanev1.AWSManagedControlPlane) field.ErrorList {
+	var allErrs field.ErrorList
+
+	autoModePath := field.NewPath("spec", "autoMode")
+
+	// nodeRoleArn is immutable once set
+	if old.Spec.AutoMode != nil && old.Spec.AutoMode.Compute != nil && old.Spec.AutoMode.Compute.NodeRoleArn != nil {
+		if r.Spec.AutoMode != nil && r.Spec.AutoMode.Compute != nil && r.Spec.AutoMode.Compute.NodeRoleArn != nil {
+			if *old.Spec.AutoMode.Compute.NodeRoleArn != *r.Spec.AutoMode.Compute.NodeRoleArn {
+				allErrs = append(allErrs, field.Invalid(
+					autoModePath.Child("compute", "nodeRoleArn"),
+					r.Spec.AutoMode.Compute.NodeRoleArn,
+					"nodeRoleArn is immutable once set",
+				))
+			}
 		}
 	}
 
