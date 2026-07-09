@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"reflect"
 	"strings"
 	"time"
 
@@ -138,6 +139,10 @@ func (s *Service) reconcileCluster(ctx context.Context) error {
 
 	if err := s.reconcileEKSEncryptionConfig(ctx, cluster.EncryptionConfig); err != nil {
 		return errors.Wrap(err, "failed reconciling eks encryption config")
+	}
+
+	if err := s.reconcileAutoMode(ctx, cluster); err != nil {
+		return errors.Wrap(err, "failed reconciling auto mode")
 	}
 
 	if err := s.reconcileTags(ctx, cluster); err != nil {
@@ -323,23 +328,35 @@ func makeEksEncryptionConfigs(encryptionConfig *ekscontrolplanev1.EncryptionConf
 	})
 }
 
-func makeKubernetesNetworkConfig(serviceCidrs *clusterv1.NetworkRanges) (*ekstypes.KubernetesNetworkConfigRequest, error) {
-	if serviceCidrs == nil || len(serviceCidrs.CIDRBlocks) == 0 {
+func makeKubernetesNetworkConfig(serviceCidrs *clusterv1.NetworkRanges, isAutoModeEnabled bool) (*ekstypes.KubernetesNetworkConfigRequest, error) {
+	if serviceCidrs == nil && !isAutoModeEnabled {
 		return nil, nil
 	}
 
-	ipv4cidrs, err := cidr.GetIPv4Cidrs(serviceCidrs.CIDRBlocks)
-	if err != nil {
-		return nil, fmt.Errorf("filtering service cidr blocks to IPv4: %w", err)
+	var netConfig ekstypes.KubernetesNetworkConfigRequest
+
+	if isAutoModeEnabled {
+		netConfig.ElasticLoadBalancing = &ekstypes.ElasticLoadBalancing{
+			Enabled: aws.Bool(true),
+		}
 	}
 
-	if len(ipv4cidrs) == 0 {
+	if serviceCidrs != nil && len(serviceCidrs.CIDRBlocks) > 0 {
+		ipv4cidrs, err := cidr.GetIPv4Cidrs(serviceCidrs.CIDRBlocks)
+		if err != nil {
+			return nil, fmt.Errorf("filtering service cidr blocks to IPv4: %w", err)
+		}
+
+		if len(ipv4cidrs) > 0 {
+			netConfig.ServiceIpv4Cidr = &ipv4cidrs[0]
+		}
+	}
+
+	if netConfig.ElasticLoadBalancing == nil && netConfig.ServiceIpv4Cidr == nil {
 		return nil, nil
 	}
 
-	return &ekstypes.KubernetesNetworkConfigRequest{
-		ServiceIpv4Cidr: &ipv4cidrs[0],
-	}, nil
+	return &netConfig, nil
 }
 
 func makeVpcConfig(subnets infrav1.Subnets, endpointAccess ekscontrolplanev1.EndpointAccess, securityGroups map[infrav1.SecurityGroupRole]infrav1.SecurityGroup) (*ekstypes.VpcConfigRequest, error) {
@@ -463,12 +480,18 @@ func (s *Service) createCluster(ctx context.Context, eksClusterName string) (*ek
 	}
 
 	var netConfig *ekstypes.KubernetesNetworkConfigRequest
+	isAutoModeEnabled := s.scope.IsAutoModeEnabled()
 	if s.scope.VPC().IsIPv6Enabled() {
 		netConfig = &ekstypes.KubernetesNetworkConfigRequest{
 			IpFamily: ekstypes.IpFamilyIpv6,
 		}
+		if isAutoModeEnabled {
+			netConfig.ElasticLoadBalancing = &ekstypes.ElasticLoadBalancing{
+				Enabled: aws.Bool(true),
+			}
+		}
 	} else {
-		netConfig, err = makeKubernetesNetworkConfig(s.scope.ServiceCidrs())
+		netConfig, err = makeKubernetesNetworkConfig(s.scope.ServiceCidrs(), isAutoModeEnabled)
 		if err != nil {
 			return nil, errors.Wrap(err, "couldn't create Kubernetes network config for cluster")
 		}
@@ -521,6 +544,26 @@ func (s *Service) createCluster(ctx context.Context, eksClusterName string) (*ek
 		KubernetesNetworkConfig:    netConfig,
 		BootstrapSelfManagedAddons: bootstrapAddon,
 		UpgradePolicy:              upgradePolicy,
+	}
+
+	if isAutoModeEnabled {
+		input.ComputeConfig = &ekstypes.ComputeConfigRequest{
+			Enabled: aws.Bool(true),
+		}
+		input.StorageConfig = &ekstypes.StorageConfigRequest{
+			BlockStorage: &ekstypes.BlockStorage{
+				Enabled: aws.Bool(true),
+			},
+		}
+
+		if autoMode := s.scope.AutoMode(); autoMode != nil && autoMode.Compute != nil {
+			if len(autoMode.Compute.NodePools) > 0 {
+				input.ComputeConfig.NodePools = autoMode.Compute.NodePools
+			}
+			if autoMode.Compute.NodeRoleArn != nil {
+				input.ComputeConfig.NodeRoleArn = autoMode.Compute.NodeRoleArn
+			}
+		}
 	}
 
 	var out *eks.CreateClusterOutput
@@ -754,6 +797,135 @@ func (s *Service) reconcileEKSEncryptionConfig(ctx context.Context, currentClust
 
 	record.Warnf(s.scope.ControlPlane, "FailedUpdateEKSControlPlane", "failed to update the EKS control plane: disabling EKS encryption is not allowed after it has been enabled")
 	return errors.Errorf("failed to update the EKS control plane: disabling EKS encryption is not allowed after it has been enabled")
+}
+
+func (s *Service) reconcileAutoMode(ctx context.Context, cluster *ekstypes.Cluster) error {
+	s.Info("reconciling auto mode configuration")
+
+	isAutoModeEnabled := s.scope.IsAutoModeEnabled()
+
+	var computeConfigEnabled bool
+	if cluster.ComputeConfig != nil {
+		computeConfigEnabled = aws.ToBool(cluster.ComputeConfig.Enabled)
+	}
+
+	var storageConfigEnabled bool
+	if cluster.StorageConfig != nil && cluster.StorageConfig.BlockStorage != nil {
+		storageConfigEnabled = aws.ToBool(cluster.StorageConfig.BlockStorage.Enabled)
+	}
+
+	var elasticLBEnabled bool
+	if cluster.KubernetesNetworkConfig != nil && cluster.KubernetesNetworkConfig.ElasticLoadBalancing != nil {
+		elasticLBEnabled = aws.ToBool(cluster.KubernetesNetworkConfig.ElasticLoadBalancing.Enabled)
+	}
+
+	currentEnabled := computeConfigEnabled && storageConfigEnabled && elasticLBEnabled
+
+	if currentEnabled == isAutoModeEnabled {
+		if isAutoModeEnabled {
+			return s.reconcileAutoModeNodePools(ctx, cluster)
+		}
+		s.Debug("auto mode configuration unchanged, no action")
+		return nil
+	}
+
+	enabled := aws.Bool(isAutoModeEnabled)
+	input := &eks.UpdateClusterConfigInput{
+		Name: aws.String(s.scope.KubernetesClusterName()),
+		ComputeConfig: &ekstypes.ComputeConfigRequest{
+			Enabled: enabled,
+		},
+		StorageConfig: &ekstypes.StorageConfigRequest{
+			BlockStorage: &ekstypes.BlockStorage{
+				Enabled: enabled,
+			},
+		},
+		KubernetesNetworkConfig: &ekstypes.KubernetesNetworkConfigRequest{
+			ElasticLoadBalancing: &ekstypes.ElasticLoadBalancing{
+				Enabled: enabled,
+			},
+		},
+	}
+
+	if isAutoModeEnabled {
+		if autoMode := s.scope.AutoMode(); autoMode != nil && autoMode.Compute != nil {
+			if len(autoMode.Compute.NodePools) > 0 {
+				input.ComputeConfig.NodePools = autoMode.Compute.NodePools
+			}
+			if autoMode.Compute.NodeRoleArn != nil {
+				input.ComputeConfig.NodeRoleArn = autoMode.Compute.NodeRoleArn
+			}
+		}
+	}
+
+	if err := wait.WaitForWithRetryable(wait.NewBackoff(), func() (bool, error) {
+		if _, err := s.EKSClient.UpdateClusterConfig(ctx, input); err != nil {
+			return false, err
+		}
+
+		if err := s.EKSClient.WaitUntilClusterUpdating(
+			ctx,
+			&eks.DescribeClusterInput{Name: aws.String(s.scope.KubernetesClusterName())},
+			s.scope.MaxWaitActiveUpdateDelete,
+		); err != nil {
+			return false, err
+		}
+
+		v1beta1conditions.MarkTrue(s.scope.ControlPlane, ekscontrolplanev1.EKSControlPlaneUpdatingCondition)
+		record.Eventf(s.scope.ControlPlane, "InitiatedUpdateEKSControlPlane", "Initiated auto mode %s for EKS control plane %s", map[bool]string{true: "enable", false: "disable"}[isAutoModeEnabled], s.scope.KubernetesClusterName())
+		return true, nil
+	}); err != nil {
+		record.Warnf(s.scope.ControlPlane, "FailedUpdateEKSControlPlane", "Failed to update EKS control plane auto mode: %v", err)
+		return errors.Wrapf(err, "failed to update EKS cluster auto mode")
+	}
+
+	return nil
+}
+
+func (s *Service) reconcileAutoModeNodePools(ctx context.Context, cluster *ekstypes.Cluster) error {
+	autoMode := s.scope.AutoMode()
+	if autoMode == nil || autoMode.Compute == nil {
+		return nil
+	}
+
+	currentNodePools := cluster.ComputeConfig.NodePools
+	desiredNodePools := autoMode.Compute.NodePools
+
+	if reflect.DeepEqual(currentNodePools, desiredNodePools) {
+		s.Debug("auto mode node pools unchanged, no action")
+		return nil
+	}
+
+	input := &eks.UpdateClusterConfigInput{
+		Name: aws.String(s.scope.KubernetesClusterName()),
+		ComputeConfig: &ekstypes.ComputeConfigRequest{
+			Enabled:  aws.Bool(true),
+			NodePools: desiredNodePools,
+		},
+	}
+
+	if err := wait.WaitForWithRetryable(wait.NewBackoff(), func() (bool, error) {
+		if _, err := s.EKSClient.UpdateClusterConfig(ctx, input); err != nil {
+			return false, err
+		}
+
+		if err := s.EKSClient.WaitUntilClusterUpdating(
+			ctx,
+			&eks.DescribeClusterInput{Name: aws.String(s.scope.KubernetesClusterName())},
+			s.scope.MaxWaitActiveUpdateDelete,
+		); err != nil {
+			return false, err
+		}
+
+		v1beta1conditions.MarkTrue(s.scope.ControlPlane, ekscontrolplanev1.EKSControlPlaneUpdatingCondition)
+		record.Eventf(s.scope.ControlPlane, "InitiatedUpdateEKSControlPlane", "Initiated auto mode node pools update for EKS control plane %s", s.scope.KubernetesClusterName())
+		return true, nil
+	}); err != nil {
+		record.Warnf(s.scope.ControlPlane, "FailedUpdateEKSControlPlane", "Failed to update EKS control plane auto mode node pools: %v", err)
+		return errors.Wrapf(err, "failed to update EKS cluster auto mode node pools")
+	}
+
+	return nil
 }
 
 func parseEKSVersion(raw string) (*version.Version, error) {
