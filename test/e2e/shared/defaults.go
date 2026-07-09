@@ -75,6 +75,7 @@ const (
 	EksUpgradeFromVersion                = "UPGRADE_FROM_VERSION"
 	EksUpgradeToVersion                  = "UPGRADE_TO_VERSION"
 	UpgradePolicy                        = "UPGRADE_POLICY"
+	EksAutoModeNodeRoleARN               = "EKS_AUTO_MODE_NODE_ROLE_ARN"
 )
 
 // ResourceQuotaFilePath is the path to the file that contains the resource usage.
