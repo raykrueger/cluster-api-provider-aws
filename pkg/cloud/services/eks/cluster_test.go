@@ -809,6 +809,167 @@ func TestReconcileEKSEncryptionConfig(t *testing.T) {
 	}
 }
 
+func TestReconcileAutoMode(t *testing.T) {
+	clusterName := "default.cluster"
+	tests := []struct {
+		name        string
+		expect      func(m *mock_eksiface.MockEKSAPIMockRecorder)
+		expectError bool
+	}{
+		{
+			name: "auto mode already enabled, no change",
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.
+					DescribeCluster(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeClusterInput{})).
+					Return(&eks.DescribeClusterOutput{
+						Cluster: &ekstypes.Cluster{
+							Name: aws.String(clusterName),
+							ComputeConfig: &ekstypes.ComputeConfigResponse{
+								Enabled:  aws.Bool(true),
+								NodePools: []string{"general-purpose"},
+							},
+							StorageConfig: &ekstypes.StorageConfigResponse{
+								BlockStorage: &ekstypes.BlockStorage{
+									Enabled: aws.Bool(true),
+								},
+							},
+							KubernetesNetworkConfig: &ekstypes.KubernetesNetworkConfigResponse{
+								ElasticLoadBalancing: &ekstypes.ElasticLoadBalancing{
+									Enabled: aws.Bool(true),
+								},
+							},
+						},
+					}, nil)
+			},
+			expectError: false,
+		},
+		{
+			name: "enable auto mode",
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.
+					DescribeCluster(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeClusterInput{})).
+					Return(&eks.DescribeClusterOutput{
+						Cluster: &ekstypes.Cluster{
+							Name:    aws.String(clusterName),
+							ComputeConfig: &ekstypes.ComputeConfigResponse{Enabled: aws.Bool(false)},
+							StorageConfig: &ekstypes.StorageConfigResponse{BlockStorage: &ekstypes.BlockStorage{Enabled: aws.Bool(false)}},
+							KubernetesNetworkConfig: &ekstypes.KubernetesNetworkConfigResponse{ElasticLoadBalancing: &ekstypes.ElasticLoadBalancing{Enabled: aws.Bool(false)}},
+						},
+					}, nil)
+				m.WaitUntilClusterUpdating(
+					gomock.Eq(context.TODO()),
+					gomock.AssignableToTypeOf(&eks.DescribeClusterInput{}),
+					gomock.Any(),
+				).Return(nil)
+				m.
+					UpdateClusterConfig(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.UpdateClusterConfigInput{})).
+					Return(&eks.UpdateClusterConfigOutput{}, nil)
+			},
+			expectError: false,
+		},
+		{
+			name: "disable auto mode",
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.
+					DescribeCluster(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeClusterInput{})).
+					Return(&eks.DescribeClusterOutput{
+						Cluster: &ekstypes.Cluster{
+							Name: aws.String(clusterName),
+							ComputeConfig: &ekstypes.ComputeConfigResponse{Enabled: aws.Bool(true)},
+							StorageConfig: &ekstypes.StorageConfigResponse{BlockStorage: &ekstypes.BlockStorage{Enabled: aws.Bool(true)}},
+							KubernetesNetworkConfig: &ekstypes.KubernetesNetworkConfigResponse{ElasticLoadBalancing: &ekstypes.ElasticLoadBalancing{Enabled: aws.Bool(true)}},
+						},
+					}, nil)
+				m.WaitUntilClusterUpdating(
+					gomock.Eq(context.TODO()),
+					gomock.AssignableToTypeOf(&eks.DescribeClusterInput{}),
+					gomock.Any(),
+				).Return(nil)
+				m.
+					UpdateClusterConfig(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.UpdateClusterConfigInput{})).
+					Return(&eks.UpdateClusterConfigOutput{}, nil)
+			},
+			expectError: false,
+		},
+		{
+			name: "auto mode not configured, cluster has no auto mode",
+			expect: func(m *mock_eksiface.MockEKSAPIMockRecorder) {
+				m.
+					DescribeCluster(gomock.Eq(context.TODO()), gomock.AssignableToTypeOf(&eks.DescribeClusterInput{})).
+					Return(&eks.DescribeClusterOutput{
+						Cluster: &ekstypes.Cluster{
+							Name: aws.String(clusterName),
+						},
+					}, nil)
+			},
+			expectError: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			mockControl := gomock.NewController(t)
+			defer mockControl.Finish()
+
+			eksMock := mock_eksiface.NewMockEKSAPI(mockControl)
+
+			scheme := runtime.NewScheme()
+			_ = infrav1.AddToScheme(scheme)
+			_ = ekscontrolplanev1.AddToScheme(scheme)
+			client := fake.NewClientBuilder().WithScheme(scheme).Build()
+
+			autoModeEnabled := tc.name != "disable auto mode" && tc.name != "auto mode not configured, cluster has no auto mode"
+
+			var autoMode *ekscontrolplanev1.AutoMode
+			if autoModeEnabled {
+				autoMode = &ekscontrolplanev1.AutoMode{
+					Mode: ekscontrolplanev1.AutoModeStateEnabled,
+					Compute: &ekscontrolplanev1.AutoModeCompute{
+						NodePools:   []string{"general-purpose"},
+						NodeRoleArn: aws.String("arn:aws:iam::123456789012:role/test-node-role"),
+					},
+				}
+			}
+
+			scope, err := scope.NewManagedControlPlaneScope(scope.ManagedControlPlaneScopeParams{
+				Client: client,
+				Cluster: &clusterv1.Cluster{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "ns",
+						Name:      clusterName,
+					},
+				},
+				ControlPlane: &ekscontrolplanev1.AWSManagedControlPlane{
+					Spec: ekscontrolplanev1.AWSManagedControlPlaneSpec{
+						EKSClusterName: clusterName,
+						AccessConfig: &ekscontrolplanev1.AccessConfig{
+							AuthenticationMode: ekscontrolplanev1.EKSAuthenticationModeAPI,
+						},
+						AutoMode: autoMode,
+					},
+				},
+			})
+			g.Expect(err).To(BeNil())
+
+			tc.expect(eksMock.EXPECT())
+			s := NewService(scope)
+			s.EKSClient = eksMock
+
+			cluster, err := s.describeEKSCluster(context.TODO(), clusterName)
+			g.Expect(err).To(BeNil())
+
+			err = s.reconcileAutoMode(context.TODO(), cluster)
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).To(BeNil())
+		})
+	}
+}
+
 func TestReconcileUpgradePolicy(t *testing.T) {
 	clusterName := "default.cluster"
 	tests := []struct {
